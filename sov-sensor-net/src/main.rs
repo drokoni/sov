@@ -6,6 +6,7 @@ use sov_core::{
 use sov_transport::{MessageType, MessageWriter, WireMessage};
 use uuid::Uuid;
 use tokio::net::TcpStream;
+use std::convert::TryInto;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -40,10 +41,14 @@ async fn run_sensor(
     cfg: &sov_core::NetSensorConfig,
 ) -> anyhow::Result<()> {
     let mut writer = MessageWriter::new(stream);
+    
+    let snaplen: i32 = cfg.snapshot_len
+    .try_into()
+    .unwrap_or(i32::MAX);
 
     let mut cap = pcap::Capture::from_device(cfg.iface.as_str())?
         .promisc(cfg.promiscuous)
-        .snaplen(cfg.snapshot_len)
+        .snaplen(snaplen)
         .timeout(1000)
         .open()?;
 
