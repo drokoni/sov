@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "sov-core",
+    "sov-transport",
+    "sov-analyzer",
+    "sov-sensor-node",
+    "sov-sensor-net",
+    "sov-admin-cli",
+    "sov-operator-cli",
+]
+
+resolver = "2"
