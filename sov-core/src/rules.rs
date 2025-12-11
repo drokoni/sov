@@ -1,4 +1,4 @@
-rules.rsuse serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RuleScope {

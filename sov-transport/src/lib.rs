@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sov-core::{CollectedEvent, RuleSet};
+use sov_core::{CollectedEvent, RuleSet};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
