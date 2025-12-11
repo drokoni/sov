@@ -1,0 +1,9 @@
+listen_addr: "0.0.0.0:5000"
+tls_enabled: false
+tls_cert_path: null
+tls_key_path: null
+
+rules_path: "config/rules.yaml"
+audit_log_path: "logs/audit.log"
+alerts_log_path: "logs/alerts.log"
+danger_log_path: "logs/danger.log"

@@ -1,0 +1,5 @@
+bindings:
+  - username: "secadmin"
+    role: "SecurityAdmin"
+  - username: "operator1"
+    role: "Operator"

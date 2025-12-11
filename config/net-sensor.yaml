@@ -1,0 +1,6 @@
+server_addr: "127.0.0.1:5000"
+node_id: "net-01"
+iface: "eth0"
+pcap_filter: "tcp"
+snapshot_len: 65535
+promiscuous: true

@@ -1,0 +1,6 @@
+server_addr: "127.0.0.1:5000"
+node_id: "node-01"
+log_paths:
+  - "/var/log/syslog"
+  - "/var/log/auth.log"
+poll_interval_ms: 1000

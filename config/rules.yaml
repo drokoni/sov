@@ -1,0 +1,23 @@
+version: "1.0"
+rules:
+  - id: "NODE_SSH_FAILED"
+    name: "SSH brute-force"
+    description: "Failed SSH login attempt"
+    scope: "Node"
+    method: "Signature"
+    severity: 5
+    signature:
+      pattern: "Failed password for"
+      is_regex: false
+      target: "node.raw_line"
+
+  - id: "NET_HTTP_GET"
+    name: "HTTP GET"
+    description: "Detect HTTP GET"
+    scope: "Net"
+    method: "Signature"
+    severity: 2
+    signature:
+      pattern: "GET /"
+      is_regex: false
+      target: "net.payload"
