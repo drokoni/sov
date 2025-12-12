@@ -16,7 +16,7 @@ async-trait = "0.1"
 
 [features]
 default = []
-windows-eventlog = []
+windows-eventlog = ["dep:windows"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", optional = true, features = [
