@@ -12,7 +12,14 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
-windows = { version = "0.58", optional = true, features = ["Win32_System_EventLog"] }
+
+
 [features]
 default = []
-windows-eventlog = ["dep:windows"]
+windows-eventlog = []
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", optional = true, features = [
+  "Win32_Foundation",
+  "Win32_System_EventLog",
+] }
