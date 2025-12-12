@@ -1,22 +1,56 @@
+use super::NodeEventSource;
 use async_trait::async_trait;
+
 use chrono::Utc;
 use sov_core::{BaseEventMeta, CollectedEvent, EventKind, NodeEventData, SensorMode};
-use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::NodeEventSource;
+/// Публичный тип, который существует ВСЕГДА.
+/// - без features: пустышка
+/// - с features на Windows: реальная реализация
+pub struct WindowsEventLogSource(Impl);
 
-#[cfg(target_os = "windows")]
-mod win_impl {
+impl WindowsEventLogSource {
+    pub fn new(cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
+        Ok(Self(Impl::new(cfg)?))
+    }
+}
+
+#[async_trait]
+impl NodeEventSource for WindowsEventLogSource {
+    async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
+        self.0.poll().await
+    }
+}
+
+#[cfg(not(all(target_os = "windows", feature = "windows-eventlog")))]
+struct Impl;
+
+#[cfg(not(all(target_os = "windows", feature = "windows-eventlog")))]
+impl Impl {
+    fn new(_cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
+        // Пустышка: ничего не собираем
+        Ok(vec![])
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "windows-eventlog"))]
+mod real {
     use super::*;
-    use windows::core::{PCWSTR};
+    use std::collections::HashMap;
+
     use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
     use windows::Win32::System::EventLog::{
-        EvtClose, EvtNext, EvtQuery, EvtRender, EVT_HANDLE, EVT_QUERY_FLAGS,
-        EVT_QUERY_CHANNEL_PATH, EVT_RENDER_FLAGS, EVT_RENDER_EVENT_XML,
+        EVT_HANDLE, EVT_QUERY_CHANNEL_PATH, EVT_RENDER_EVENT_XML, EvtClose, EvtNext, EvtQuery,
+        EvtRender,
     };
+    use windows::core::PCWSTR;
 
-    /// RAII-обёртка, чтобы не забывать закрывать EVT_HANDLE
+    /// RAII для EVT_HANDLE
     struct EvtHandle(EVT_HANDLE);
     impl Drop for EvtHandle {
         fn drop(&mut self) {
@@ -29,17 +63,14 @@ mod win_impl {
     }
 
     fn to_wide_null(s: &str) -> Vec<u16> {
-        // UTF-16 + \0
         let mut v: Vec<u16> = s.encode_utf16().collect();
         v.push(0);
         v
     }
 
     fn extract_event_record_id(xml: &str) -> Option<u64> {
-        // Очень простая вырезка: <EventRecordID>123</EventRecordID>
         let start_tag = "<EventRecordID>";
         let end_tag = "</EventRecordID>";
-
         let s = xml.find(start_tag)? + start_tag.len();
         let e = xml[s..].find(end_tag)? + s;
         xml[s..e].trim().parse::<u64>().ok()
@@ -47,7 +78,6 @@ mod win_impl {
 
     fn render_event_xml(h: EVT_HANDLE) -> anyhow::Result<String> {
         unsafe {
-            // Сначала спросим размер буфера
             let mut used: u32 = 0;
             let mut props: u32 = 0;
 
@@ -62,16 +92,14 @@ mod win_impl {
             );
 
             if ok.as_bool() {
-                // странно, но пусть
                 return Ok(String::new());
             }
 
             let err = GetLastError();
             if err != ERROR_INSUFFICIENT_BUFFER {
-                anyhow::bail!("EvtRender size probe failed: {:?}", err);
+                anyhow::bail!("EvtRender probe failed: {:?}", err);
             }
 
-            // used — в байтах. Нам нужен буфер u16.
             let wchar_len = (used as usize / 2).saturating_add(1);
             let mut buf: Vec<u16> = vec![0u16; wchar_len];
 
@@ -86,26 +114,24 @@ mod win_impl {
             );
 
             if !ok2.as_bool() {
-                let err2 = GetLastError();
-                anyhow::bail!("EvtRender failed: {:?}", err2);
+                anyhow::bail!("EvtRender failed: {:?}", GetLastError());
             }
 
-            // buf содержит UTF-16 строку с '\0' в конце
             let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
             Ok(String::from_utf16_lossy(&buf[..nul]))
         }
     }
 
-    pub struct WindowsEventLogSource {
+    pub(super) struct RealImpl {
         node_id: String,
         channels: Vec<String>,
         last_record_id: HashMap<String, u64>,
         max_per_poll: u32,
     }
 
-    impl WindowsEventLogSource {
+    impl RealImpl {
         pub fn new(cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
-
+            // Используем log_paths как список каналов: Security/System/Application
             let channels = if cfg.log_paths.is_empty() {
                 vec!["Security".to_string()]
             } else {
@@ -129,33 +155,30 @@ mod win_impl {
         }
 
         fn query_channel_since(&self, channel: &str, since_id: u64) -> anyhow::Result<EvtHandle> {
-            // XPath query: события с EventRecordID > since_id
-            // Мы читаем как "channel path query"
             let query = format!("*[System[EventRecordID>{}]]", since_id);
 
-            let channel_w = to_wide_null(channel);
-            let query_w = to_wide_null(&query);
+            let ch_w = to_wide_null(channel);
+            let q_w = to_wide_null(&query);
 
             unsafe {
                 let h = EvtQuery(
                     EVT_HANDLE::default(),
-                    PCWSTR(channel_w.as_ptr()),
-                    PCWSTR(query_w.as_ptr()),
-                    EVT_QUERY_FLAGS(EVT_QUERY_CHANNEL_PATH.0),
+                    PCWSTR(ch_w.as_ptr()),
+                    PCWSTR(q_w.as_ptr()),
+                    EVT_QUERY_CHANNEL_PATH,
                 );
 
                 if h.is_invalid() {
                     anyhow::bail!("EvtQuery failed for channel={channel}");
                 }
-
                 Ok(EvtHandle(h))
             }
         }
 
         fn next_events(&self, query: &EvtHandle) -> anyhow::Result<Vec<EvtHandle>> {
             unsafe {
-                // Возьмём батч хэндлов событий
-                let mut arr: Vec<EVT_HANDLE> = vec![EVT_HANDLE::default(); self.max_per_poll as usize];
+                let mut arr: Vec<EVT_HANDLE> =
+                    vec![EVT_HANDLE::default(); self.max_per_poll as usize];
                 let mut returned: u32 = 0;
 
                 let ok = EvtNext(
@@ -168,7 +191,6 @@ mod win_impl {
                 );
 
                 if !ok.as_bool() {
-                    // Если ничего нет — просто вернём пусто
                     return Ok(vec![]);
                 }
 
@@ -176,11 +198,8 @@ mod win_impl {
                 Ok(arr.into_iter().map(EvtHandle).collect())
             }
         }
-    }
 
-    #[async_trait]
-    impl NodeEventSource for WindowsEventLogSource {
-        async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
+        pub async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
             let mut out = Vec::new();
 
             for ch in &self.channels {
@@ -216,50 +235,24 @@ mod win_impl {
                     });
                 }
 
-                // “только новые” дальше
                 self.last_record_id.insert(ch.clone(), max_seen);
             }
 
             Ok(out)
         }
     }
-
-    pub(super) use WindowsEventLogSource as Impl;
 }
 
-#[cfg(target_os = "windows")]
-pub struct WindowsEventLogSource(win_impl::Impl);
+#[cfg(all(target_os = "windows", feature = "windows-eventlog"))]
+struct Impl(real::RealImpl);
 
-#[cfg(target_os = "windows")]
-impl WindowsEventLogSource {
-    pub fn new(cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
-        Ok(Self(win_impl::Impl::new(cfg)?))
+#[cfg(all(target_os = "windows", feature = "windows-eventlog"))]
+impl Impl {
+    fn new(cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
+        Ok(Self(real::RealImpl::new(cfg)?))
     }
-}
 
-#[cfg(target_os = "windows")]
-#[async_trait]
-impl NodeEventSource for WindowsEventLogSource {
     async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
         self.0.poll().await
     }
 }
-
-#[cfg(not(target_os = "windows"))]
-pub struct WindowsEventLogSource;
-
-#[cfg(not(target_os = "windows"))]
-impl WindowsEventLogSource {
-    pub fn new(_cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
-        anyhow::bail!("WindowsEventLogSource is only available on Windows builds")
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-#[async_trait]
-impl NodeEventSource for WindowsEventLogSource {
-    async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
-        Ok(vec![])
-    }
-}
-
