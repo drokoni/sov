@@ -87,8 +87,7 @@ mod real {
             let probe = EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                windows::Win32::System::EventLog::EVT_RENDER_FLAGS(0x1),
-                0,
+                0x1u32,
                 None,
                 &mut used,
                 &mut props,
@@ -112,7 +111,7 @@ mod real {
             EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                windows::Win32::System::EventLog::EVT_RENDER_FLAGS(0x1),
+                0x1u32,
                 used,
                 Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
                 &mut used,
