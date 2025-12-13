@@ -88,6 +88,7 @@ mod real {
                 EVT_HANDLE::default(),
                 h,
                 0x1u32,
+                0,
                 None,
                 &mut used,
                 &mut props,
