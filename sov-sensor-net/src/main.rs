@@ -12,12 +12,20 @@ use uuid::Uuid;
 struct Args {
     #[arg(short, long, default_value = "config/net-sensor.yaml")]
     config: String,
+
+    /// Print available pcap interfaces and exit
+    #[arg(long)]
+    list_ifaces: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg = load_net_sensor_config(&args.config)?;
+    if args.list_ifaces {
+        list_ifaces()?;
+        return Ok(());
+    }
 
     loop {
         match TcpStream::connect(&cfg.server_addr).await {
@@ -193,4 +201,16 @@ fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
         }
         _ => (src_ip, 0, dst_ip, 0, format!("IP_PROTO_{proto}")),
     }
+}
+fn list_ifaces() -> anyhow::Result<()> {
+    let devices = pcap::Device::list()?;
+    println!("Available pcap interfaces:\n");
+    for d in devices {
+        println!("Name: {}", d.name);
+        if let Some(desc) = d.desc {
+            println!("  Desc: {}", desc);
+        }
+        println!();
+    }
+    Ok(())
 }
