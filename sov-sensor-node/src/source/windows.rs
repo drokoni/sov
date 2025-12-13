@@ -167,7 +167,7 @@ mod real {
                     EVT_HANDLE::default(),
                     PCWSTR(ch_w.as_ptr()),
                     PCWSTR(q_w.as_ptr()),
-                    windows::Win32::System::EventLog::EVT_QUERY_FLAGS(0x1),
+                    0x1u32,
                 )?;
 
                 if h.is_invalid() {
