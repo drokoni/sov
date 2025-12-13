@@ -87,7 +87,7 @@ mod real {
             let probe = EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                EVT_RENDER_FLAGS::EVT_RENDER_EVENT_XML,
+                windows::Win32::System::EventLog::EVT_RENDER_FLAGS(0x1),
                 0,
                 None,
                 &mut used,
@@ -112,7 +112,7 @@ mod real {
             EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                EVT_RENDER_FLAGS::EVT_RENDER_EVENT_XML,
+                windows::Win32::System::EventLog::EVT_RENDER_FLAGS(0x1),
                 used,
                 Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
                 &mut used,
@@ -168,7 +168,7 @@ mod real {
                     EVT_HANDLE::default(),
                     PCWSTR(ch_w.as_ptr()),
                     PCWSTR(q_w.as_ptr()),
-                    EVT_QUERY_FLAGS::EVT_QUERY_CHANNEL_PATH.0,
+                    windows::Win32::System::EventLog::EVT_QUERY_FLAGS(0x1),
                 )?;
 
                 if h.is_invalid() {
