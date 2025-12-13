@@ -1,23 +1,50 @@
 version: "1.0"
+
 rules:
+  # Linux: неудачный SSH логин
   - id: "NODE_SSH_FAILED"
-    name: "SSH brute-force"
+    name: "SSH failed login"
     description: "Failed SSH login attempt"
     scope: "Node"
     method: "Signature"
     severity: 5
     signature:
-      pattern: "Failed password for"
+      pattern: "Failed password"
       is_regex: false
       target: "node.raw_line"
 
-  - id: "NET_HTTP_GET"
-    name: "HTTP GET"
-    description: "Detect HTTP GET"
-    scope: "Net"
+  # Linux: sudo
+  - id: "NODE_SUDO"
+    name: "Sudo usage"
+    description: "User used sudo"
+    scope: "Node"
     method: "Signature"
     severity: 2
     signature:
-      pattern: "GET /"
+      pattern: "sudo"
       is_regex: false
-      target: "net.payload"
+      target: "node.raw_line"
+
+  # Windows: failed logon (EventID 4625)
+  - id: "WIN_FAILED_LOGON"
+    name: "Windows failed logon"
+    description: "Failed Windows login"
+    scope: "Node"
+    method: "Signature"
+    severity: 5
+    signature:
+      pattern: "<EventID>4625</EventID>"
+      is_regex: false
+      target: "node.raw_line"
+
+  # Windows: process creation (EventID 4688)
+  - id: "WIN_PROCESS_CREATE"
+    name: "Windows process creation"
+    description: "Process created"
+    scope: "Node"
+    method: "Signature"
+    severity: 2
+    signature:
+      pattern: "<EventID>4688</EventID>"
+      is_regex: false
+      target: "node.raw_line"
