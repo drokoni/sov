@@ -22,7 +22,6 @@ impl NodeEventSource for WindowsEventLogSource {
         self.0.poll().await
     }
 }
-
 #[cfg(not(all(target_os = "windows", feature = "windows-eventlog")))]
 struct Impl;
 
@@ -33,7 +32,6 @@ impl Impl {
     }
 
     async fn poll(&mut self) -> anyhow::Result<Vec<CollectedEvent>> {
-        // Пустышка: ничего не собираем
         Ok(vec![])
     }
 }
@@ -43,15 +41,14 @@ mod real {
     use super::*;
     use std::collections::HashMap;
 
-    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows::Win32::System::EventLog::{
-        EVT_HANDLE, EVT_QUERY_CHANNEL_PATH, EVT_RENDER_EVENT_XML, EvtClose, EvtNext, EvtQuery,
-        EvtRender,
+        EVT_HANDLE, EVT_QUERY_FLAGS, EVT_RENDER_FLAGS, EvtClose, EvtNext, EvtQuery, EvtRender,
     };
-    use windows::core::PCWSTR;
+    use windows::core::{HRESULT, PCWSTR};
 
     /// RAII для EVT_HANDLE
-    struct EvtHandle(EVT_HANDLE);
+    pub(super) struct EvtHandle(pub(super) EVT_HANDLE);
     impl Drop for EvtHandle {
         fn drop(&mut self) {
             unsafe {
@@ -76,46 +73,51 @@ mod real {
         xml[s..e].trim().parse::<u64>().ok()
     }
 
+    fn is_insufficient_buffer(err: &windows::core::Error) -> bool {
+        // Win32 ERROR_INSUFFICIENT_BUFFER -> HRESULT
+        err.code() == HRESULT::from_win32(ERROR_INSUFFICIENT_BUFFER.0)
+    }
+
     fn render_event_xml(h: EVT_HANDLE) -> anyhow::Result<String> {
         unsafe {
             let mut used: u32 = 0;
             let mut props: u32 = 0;
 
-            let ok = EvtRender(
+            // 1) Пробуем без буфера, чтобы узнать размер
+            let probe = EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                EVT_RENDER_EVENT_XML,
+                EVT_RENDER_FLAGS::EVT_RENDER_EVENT_XML,
                 0,
                 None,
                 &mut used,
                 &mut props,
             );
 
-            if ok.as_bool() {
+            if let Err(e) = probe {
+                if !is_insufficient_buffer(&e) {
+                    return Err(anyhow::anyhow!("EvtRender probe failed: {e:?}"));
+                }
+            }
+
+            if used == 0 {
                 return Ok(String::new());
             }
 
-            let err = GetLastError();
-            if err != ERROR_INSUFFICIENT_BUFFER {
-                anyhow::bail!("EvtRender probe failed: {:?}", err);
-            }
-
+            // used — байты UTF-16 строки
             let wchar_len = (used as usize / 2).saturating_add(1);
             let mut buf: Vec<u16> = vec![0u16; wchar_len];
 
-            let ok2 = EvtRender(
+            // Рендерим в буфер
+            EvtRender(
                 EVT_HANDLE::default(),
                 h,
-                EVT_RENDER_EVENT_XML,
+                EVT_RENDER_FLAGS::EVT_RENDER_EVENT_XML,
                 used,
                 Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
                 &mut used,
                 &mut props,
-            );
-
-            if !ok2.as_bool() {
-                anyhow::bail!("EvtRender failed: {:?}", GetLastError());
-            }
+            )?;
 
             let nul = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
             Ok(String::from_utf16_lossy(&buf[..nul]))
@@ -126,12 +128,13 @@ mod real {
         node_id: String,
         channels: Vec<String>,
         last_record_id: HashMap<String, u64>,
-        max_per_poll: u32,
+        max_per_poll: usize,
     }
 
     impl RealImpl {
         pub fn new(cfg: &sov_core::NodeSensorConfig) -> anyhow::Result<Self> {
-            // Используем log_paths как список каналов: Security/System/Application
+            // В Windows используем cfg.log_paths как список каналов:
+            // "Security", "System", "Application"
             let channels = if cfg.log_paths.is_empty() {
                 vec!["Security".to_string()]
             } else {
@@ -165,37 +168,33 @@ mod real {
                     EVT_HANDLE::default(),
                     PCWSTR(ch_w.as_ptr()),
                     PCWSTR(q_w.as_ptr()),
-                    EVT_QUERY_CHANNEL_PATH,
-                );
+                    EVT_QUERY_FLAGS::EVT_QUERY_CHANNEL_PATH.0,
+                )?;
 
                 if h.is_invalid() {
-                    anyhow::bail!("EvtQuery failed for channel={channel}");
+                    anyhow::bail!("EvtQuery returned invalid handle for channel={channel}");
                 }
+
                 Ok(EvtHandle(h))
             }
         }
 
         fn next_events(&self, query: &EvtHandle) -> anyhow::Result<Vec<EvtHandle>> {
             unsafe {
-                let mut arr: Vec<EVT_HANDLE> =
-                    vec![EVT_HANDLE::default(); self.max_per_poll as usize];
+                let mut raw: Vec<isize> = vec![0isize; self.max_per_poll];
                 let mut returned: u32 = 0;
 
-                let ok = EvtNext(
-                    query.0,
-                    self.max_per_poll,
-                    arr.as_mut_ptr(),
-                    0,
-                    0,
-                    &mut returned,
-                );
+                let res = EvtNext(query.0, &mut raw, 0, 0, &mut returned);
 
-                if !ok.as_bool() {
+                if res.is_err() || returned == 0 {
                     return Ok(vec![]);
                 }
 
-                arr.truncate(returned as usize);
-                Ok(arr.into_iter().map(EvtHandle).collect())
+                let mut out = Vec::with_capacity(returned as usize);
+                for i in 0..(returned as usize) {
+                    out.push(EvtHandle(EVT_HANDLE(raw[i])));
+                }
+                Ok(out)
             }
         }
 
@@ -215,6 +214,7 @@ mod real {
 
                 for evh in events {
                     let xml = render_event_xml(evh.0)?;
+
                     if let Some(rid) = extract_event_record_id(&xml) {
                         if rid > max_seen {
                             max_seen = rid;
