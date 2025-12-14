@@ -1,9 +1,10 @@
 server_addr: "192.168.0.102:5000"
-node_id: "kali-node-01"
+node_id: "win-node-01"
 
 log_paths:
-  - "/var/log/auth.log"
-  - "/var/log/syslog"
+  - "Security"
+  - "System"
+  - "Application"
 
 poll_interval_ms: 1000
 
@@ -13,3 +14,4 @@ tls:
   cert_path: "config/pki/sensor-node.crt"
   key_path: "config/pki/sensor-node.key"
   server_name: "sov-analyzer"
+

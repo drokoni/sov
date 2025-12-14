@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -e
+source "$(dirname "$0")/env.sh"
 
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-
-exec "$ROOT_DIR/target/release/sov-operator-cli" \
-    -c "$ROOT_DIR/config/operator-cli.yaml" \
-    "$@"
+exec "$BIN/sov-operator-cli" -c "$CFG/operator-cli.yaml" "$@"

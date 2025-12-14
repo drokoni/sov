@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 set -e
+source "$(dirname "$0")/env.sh"
 
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-
-export RUST_LOG=info
-
-echo "[+] Starting SOV Network Sensor"
+echo "[+] Starting Net Sensor (Linux)..."
 echo "[!] Requires sudo for pcap access"
-
-exec sudo "$ROOT_DIR/target/release/sov-sensor-net" \
-    -c "$ROOT_DIR/config/net-sensor.yaml"
+exec sudo -E "$BIN/sov-sensor-net" -c "$CFG/net-sensor.yaml"

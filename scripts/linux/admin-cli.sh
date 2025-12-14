@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 set -e
+source "$(dirname "$0")/env.sh"
 
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-
-exec "$ROOT_DIR/target/release/sov-admin-cli" \
-    -c "$ROOT_DIR/config/admin-cli.yaml" \
-    "$@"
+exec "$BIN/sov-admin-cli" -c "$CFG/admin-cli.yaml" "$@"

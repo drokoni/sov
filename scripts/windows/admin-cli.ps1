@@ -1,6 +1,3 @@
-$Root = Resolve-Path "$PSScriptRoot\..\.."
-
-& "$Root\target\release\sov-admin-cli.exe" `
-  -c "$Root\config\admin-cli.yaml" `
-  @args
+. "$PSScriptRoot\env.ps1"
+& "$Bin\sov-admin-cli.exe" -c "$Cfg\admin-cli.yaml" @args
 

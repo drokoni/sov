@@ -1,0 +1,8 @@
+server_addr: "192.168.0.102:5000"
+
+tls:
+  enabled: true
+  ca_path: "config/pki/ca.crt"
+  cert_path: "config/pki/admin.crt"
+  key_path: "config/pki/admin.key"
+  server_name: "sov-analyzer"
