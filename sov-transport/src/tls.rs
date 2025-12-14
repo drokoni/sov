@@ -14,15 +14,17 @@ pub struct TlsConfig {
 }
 
 fn load_certs(path: &str) -> anyhow::Result<Vec<Certificate>> {
-    let f = File::open(path)?;
+    let f = File::open(path)
+        .map_err(|e| anyhow::anyhow!("open certs failed: path='{}': {}", path, e))?;
     let mut r = BufReader::new(f);
     Ok(certs(&mut r)?.into_iter().map(Certificate).collect())
 }
 
 fn load_private_key(path: &str) -> anyhow::Result<PrivateKey> {
-    //
+    // PKCS8
     {
-        let f = File::open(path)?;
+        let f = File::open(path)
+            .map_err(|e| anyhow::anyhow!("open key failed: path='{}': {}", path, e))?;
         let mut r = BufReader::new(f);
         if let Ok(mut keys) = pkcs8_private_keys(&mut r) {
             if let Some(k) = keys.pop() {
@@ -31,8 +33,10 @@ fn load_private_key(path: &str) -> anyhow::Result<PrivateKey> {
         }
     }
 
+    // RSA
     {
-        let f = File::open(path)?;
+        let f = File::open(path)
+            .map_err(|e| anyhow::anyhow!("open key failed: path='{}': {}", path, e))?;
         let mut r = BufReader::new(f);
         if let Ok(mut keys) = rsa_private_keys(&mut r) {
             if let Some(k) = keys.pop() {
