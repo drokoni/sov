@@ -46,3 +46,20 @@ pub fn load_net_sensor_config(path: &str) -> anyhow::Result<NetSensorConfig> {
     let text = std::fs::read_to_string(path)?;
     Ok(serde_yaml::from_str(&text)?)
 }
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TlsSection {
+    pub enabled: bool,
+    pub require_mtls: bool,
+    pub ca_path: String,
+    pub cert_path: String,
+    pub key_path: String,
+    pub server_name: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AnalyzerConfig {
+    pub listen_addr: String,
+    pub rules_path: std::path::PathBuf,
+    pub audit_log_path: String,
+    pub tls: Option<TlsSection>,
+}
