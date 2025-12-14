@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,15 +48,6 @@ pub fn load_analyzer_config(path: &str) -> anyhow::Result<AnalyzerConfig> {
     Ok(serde_yaml::from_str(&text)?)
 }
 
-pub fn load_node_sensor_config(path: &str) -> anyhow::Result<NodeSensorConfig> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(serde_yaml::from_str(&text)?)
-}
-
-pub fn load_net_sensor_config(path: &str) -> anyhow::Result<NetSensorConfig> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(serde_yaml::from_str(&text)?)
-}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TlsSection {
     pub enabled: bool,
