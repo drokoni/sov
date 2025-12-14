@@ -85,3 +85,39 @@ pub fn load_cli_config(path: &str) -> anyhow::Result<CliConfig> {
     let text = std::fs::read_to_string(path)?;
     Ok(serde_yaml::from_str(&text)?)
 }
+fn resolve_path(base: &Path, p: &str) -> String {
+    let pp = Path::new(p);
+    if pp.is_absolute() {
+        p.to_string()
+    } else {
+        base.join(pp).to_string_lossy().to_string()
+    }
+}
+pub fn load_net_sensor_config(path: &str) -> anyhow::Result<NetSensorConfig> {
+    let text = std::fs::read_to_string(path)?;
+    let mut cfg: NetSensorConfig = serde_yaml::from_str(&text)?;
+
+    let base = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+
+    if let Some(tls) = cfg.tls.as_mut() {
+        tls.ca_path = resolve_path(base, &tls.ca_path);
+        tls.cert_path = resolve_path(base, &tls.cert_path);
+        tls.key_path = resolve_path(base, &tls.key_path);
+    }
+
+    Ok(cfg)
+}
+pub fn load_node_sensor_config(path: &str) -> anyhow::Result<NodeSensorConfig> {
+    let text = std::fs::read_to_string(path)?;
+    let mut cfg: NodeSensorConfig = serde_yaml::from_str(&text)?;
+
+    let base = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+
+    if let Some(tls) = cfg.tls.as_mut() {
+        tls.ca_path = resolve_path(base, &tls.ca_path);
+        tls.cert_path = resolve_path(base, &tls.cert_path);
+        tls.key_path = resolve_path(base, &tls.key_path);
+    }
+
+    Ok(cfg)
+}
