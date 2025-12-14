@@ -6,6 +6,7 @@ use sov_core::{
 use sov_transport::{MessageType, MessageWriter, WireMessage};
 use std::convert::TryInto;
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -13,38 +14,94 @@ struct Args {
     #[arg(short, long, default_value = "config/net-sensor.yaml")]
     config: String,
 
-    /// Print available pcap interfaces and exit
     #[arg(long)]
     list_ifaces: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_logging();
+
     let args = Args::parse();
-    let cfg = load_net_sensor_config(&args.config)?;
+
     if args.list_ifaces {
         list_ifaces()?;
         return Ok(());
     }
 
+    let cfg = load_net_sensor_config(&args.config)?;
+
+    tracing::info!(
+        sensor = "net",
+        node_id = %cfg.node_id,
+        server = %cfg.server_addr,
+        iface = %cfg.iface,
+        filter = %cfg.pcap_filter,
+        "sensor started"
+    );
+
+    // Канал остановки
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Отдельная задача: ждём Ctrl+C
+    {
+        let shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                tracing::warn!("Ctrl+C received, shutting down...");
+                let _ = shutdown_tx.send(true);
+            }
+        });
+    }
+
+    // Внешний цикл переподключения
     loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
         match TcpStream::connect(&cfg.server_addr).await {
             Ok(stream) => {
-                println!("Net sensor connected to analyzer at {}", cfg.server_addr);
-                if let Err(e) = run_sensor(stream, &cfg).await {
-                    eprintln!("Net sensor error: {e}");
+                tracing::info!(
+                    server = %cfg.server_addr,
+                    "connected to analyzer"
+                );
+
+                // Важно: передаем shutdown_rx внутрь
+                if let Err(e) = run_sensor(stream, &cfg, shutdown_rx.clone()).await {
+                    if *shutdown_rx.borrow() {
+                        // если остановка — не шумим ошибкой
+                        tracing::info!("sensor stopping, run_sensor finished");
+                    } else {
+                        tracing::error!(error = %e, "run_sensor error");
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Connect error: {e}");
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                tracing::error!(error = %e, "connect error");
             }
         }
 
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
+        tracing::info!("reconnect in 5s...");
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+
+    tracing::info!("sensor stopped");
+    Ok(())
 }
 
-async fn run_sensor(stream: TcpStream, cfg: &sov_core::NetSensorConfig) -> anyhow::Result<()> {
+async fn run_sensor(
+    stream: TcpStream,
+    cfg: &sov_core::NetSensorConfig,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let mut writer = MessageWriter::new(stream);
 
     let snaplen: i32 = cfg.snapshot_len.try_into().unwrap_or(i32::MAX);
@@ -52,12 +109,26 @@ async fn run_sensor(stream: TcpStream, cfg: &sov_core::NetSensorConfig) -> anyho
     let mut cap = pcap::Capture::from_device(cfg.iface.as_str())?
         .promisc(cfg.promiscuous)
         .snaplen(snaplen)
+        // важно: timeout, чтобы цикл мог проверить shutdown
         .timeout(1000)
         .open()?;
 
     cap.filter(&cfg.pcap_filter, true)?;
 
+    tracing::info!(
+        iface = %cfg.iface,
+        snaplen = snaplen,
+        promisc = cfg.promiscuous,
+        "pcap capture opened"
+    );
+
     loop {
+        // Быстрая проверка: пришел ли shutdown
+        if *shutdown_rx.borrow() {
+            tracing::info!("shutdown signal received inside net sensor loop");
+            break;
+        }
+
         match cap.next_packet() {
             Ok(packet) => {
                 let (src_ip, src_port, dst_ip, dst_port, proto) = parse_packet_basic(&packet.data);
@@ -68,8 +139,18 @@ async fn run_sensor(stream: TcpStream, cfg: &sov_core::NetSensorConfig) -> anyho
                     .take(400)
                     .collect::<String>();
 
-                if payload_snippet.contains("GET") || payload_snippet.contains("HTTP") {
-                    println!("PAYLOAD_SNIPPET: {}", payload_snippet);
+                // Debug-вывод только при HTTP признаках
+                if payload_snippet.contains("GET ")
+                    || payload_snippet.contains("HTTP/")
+                    || payload_snippet.contains("Host:")
+                {
+                    tracing::debug!(
+                        src = %format!("{src_ip}:{src_port}"),
+                        dst = %format!("{dst_ip}:{dst_port}"),
+                        proto = %proto,
+                        "payload snippet: {}",
+                        payload_snippet
+                    );
                 }
 
                 let event = CollectedEvent {
@@ -95,13 +176,21 @@ async fn run_sensor(stream: TcpStream, cfg: &sov_core::NetSensorConfig) -> anyho
                     event: Some(event),
                     ruleset: None,
                 };
-                writer.send(&msg).await?;
+
+                // Если анализатор отвалился — выйдем наружу, чтобы reconnect сработал
+                if let Err(e) = writer.send(&msg).await {
+                    tracing::warn!(error = %e, "send failed, will reconnect");
+                    return Err(e.into());
+                }
             }
             Err(_) => {
                 // timeout / no packet - ignore
+                // за счет timeout мы регулярно возвращаемся сюда и можем выйти по shutdown
             }
         }
     }
+
+    Ok(())
 }
 
 fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
@@ -110,8 +199,7 @@ fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
     }
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
     if ethertype != 0x0800 {
-        // IPv4
-        return None;
+        return None; // not IPv4
     }
 
     let ip = &frame[14..];
@@ -132,8 +220,7 @@ fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
 
     let proto = ip[9];
     if proto != 6 {
-        // TCP
-        return None;
+        return None; // not TCP
     }
 
     let tcp = &ip[ihl..];
@@ -146,8 +233,7 @@ fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
         return None;
     }
 
-    let payload = &tcp[data_offset..];
-    Some(payload)
+    Some(&tcp[data_offset..])
 }
 
 fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
@@ -182,7 +268,6 @@ fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
 
     match proto {
         6 => {
-            // TCP
             if l4.len() < 20 {
                 return (src_ip, 0, dst_ip, 0, "TCP_SHORT".into());
             }
@@ -191,7 +276,6 @@ fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
             (src_ip, src_port, dst_ip, dst_port, "TCP".into())
         }
         17 => {
-            // UDP
             if l4.len() < 8 {
                 return (src_ip, 0, dst_ip, 0, "UDP_SHORT".into());
             }
@@ -202,6 +286,7 @@ fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
         _ => (src_ip, 0, dst_ip, 0, format!("IP_PROTO_{proto}")),
     }
 }
+
 fn list_ifaces() -> anyhow::Result<()> {
     let devices = pcap::Device::list()?;
     println!("Available pcap interfaces:\n");
@@ -213,4 +298,16 @@ fn list_ifaces() -> anyhow::Result<()> {
         println!();
     }
     Ok(())
+}
+
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_level(true)
+        .init();
 }

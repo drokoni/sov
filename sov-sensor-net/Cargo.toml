@@ -12,3 +12,5 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 pcap = "1"
+tracing ="0.1"
+tracing-substring = {version = "0.3", features=["fmt","evn-filter"]}
