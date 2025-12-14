@@ -14,6 +14,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio-rustls = "0.24"
+rustls = "0.21"
 
 
 

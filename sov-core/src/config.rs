@@ -24,6 +24,9 @@ pub struct NodeSensorConfig {
     pub node_id: String,
     pub log_paths: Vec<PathBuf>,
     pub poll_interval_ms: u64,
+
+    #[serde(default)]
+    pub tls: Option<TlsSection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,9 @@ pub struct NetSensorConfig {
     pub pcap_filter: String,
     pub snapshot_len: u32,
     pub promiscuous: bool,
+
+    #[serde(default)]
+    pub tls: Option<TlsSection>,
 }
 
 pub fn load_analyzer_config(path: &str) -> anyhow::Result<AnalyzerConfig> {
@@ -50,9 +56,10 @@ pub fn load_net_sensor_config(path: &str) -> anyhow::Result<NetSensorConfig> {
     let text = std::fs::read_to_string(path)?;
     Ok(serde_yaml::from_str(&text)?)
 }
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TlsSection {
     pub enabled: bool,
+    #[serde(default)]
     pub require_mtls: bool,
     pub ca_path: String,
     pub cert_path: String,

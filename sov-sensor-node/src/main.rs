@@ -46,14 +46,20 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         match TcpStream::connect(&cfg.server_addr).await {
-            Ok(stream) => {
+            Ok(tcp) => {
                 tracing::info!("Node sensor connected to analyzer at {}", cfg.server_addr);
 
-                if let Err(e) = run_sensor(stream, &cfg, os, shutdown_rx.clone()).await {
+                let res = if cfg.tls.as_ref().map(|t| t.enabled).unwrap_or(false) {
+                    run_sensor_tls(tcp, &cfg, args.os, shutdown_rx.clone()).await
+                } else {
+                    run_sensor_plain(tcp, &cfg, args.os, shutdown_rx.clone()).await
+                };
+
+                if let Err(e) = res {
                     tracing::error!("Node sensor error: {e}");
                 }
             }
-            Err(e) => tracing::warn!("Connect error: {e}"),
+            Err(e) => tracing::error!("Connect error: {e}"),
         }
 
         // если shutdown уже поднят — выходим, не реконнектимся
@@ -69,25 +75,21 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_sensor(
-    stream: TcpStream,
+async fn run_sensor_plain(
+    tcp: TcpStream,
     cfg: &sov_core::NodeSensorConfig,
-    os: source::OsKind,
+    os: Option<source::OsKind>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let mut writer = MessageWriter::new(stream);
-
+    let os = os.unwrap_or_else(source::default_os);
     let mut src = source::create_source(os, cfg)?;
+    let mut writer = MessageWriter::new(tcp);
 
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    tracing::warn!("shutdown received, stopping node sensor loop");
-                    return Ok(());
-                }
+                if *shutdown_rx.borrow() { break; }
             }
-
             res = src.poll() => {
                 let events = res?;
                 for ev in events {
@@ -95,16 +97,63 @@ async fn run_sensor(
                         kind: MessageType::Event,
                         event: Some(ev),
                         ruleset: None,
-                        status: None,
                         config_patch: None,
+                        status: None,
                     };
                     writer.send(&msg).await?;
                 }
             }
         }
     }
+    Ok(())
 }
 
+async fn run_sensor_tls(
+    tcp: TcpStream,
+    cfg: &sov_core::NodeSensorConfig,
+    os: Option<source::OsKind>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let t = cfg.tls.as_ref().unwrap();
+    let tls_cfg = tls_cfg_from_section(t);
+    let connector = sov_transport::tls::build_tls_connector(&tls_cfg)?;
+
+    let sni = tls_cfg
+        .server_name
+        .clone()
+        .unwrap_or_else(|| "sov-analyzer".to_string());
+    let server_name = rustls::ServerName::try_from(sni.as_str())?;
+    let tls_stream = connector.connect(server_name, tcp).await?;
+    tracing::info!("TLS connected to analyzer");
+
+    let (_rd, wr) = tokio::io::split(tls_stream);
+    let mut writer = MessageWriter::new(wr);
+
+    let os = os.unwrap_or_else(source::default_os);
+    let mut src = source::create_source(os, cfg)?;
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() { break; }
+            }
+            res = src.poll() => {
+                let events = res?;
+                for ev in events {
+                    let msg = WireMessage {
+                        kind: MessageType::Event,
+                        event: Some(ev),
+                        ruleset: None,
+                        config_patch: None,
+                        status: None,
+                    };
+                    writer.send(&msg).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
 
@@ -114,4 +163,13 @@ fn init_logging() {
         .with_target(false)
         .with_level(true)
         .init();
+}
+fn tls_cfg_from_section(t: &sov_core::TlsSection) -> sov_transport::tls::TlsConfig {
+    sov_transport::tls::TlsConfig {
+        ca_path: t.ca_path.clone(),
+        cert_path: t.cert_path.clone(),
+        key_path: t.key_path.clone(),
+        server_name: t.server_name.clone(),
+        require_mtls: t.require_mtls,
+    }
 }

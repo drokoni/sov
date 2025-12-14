@@ -40,10 +40,8 @@ async fn main() -> anyhow::Result<()> {
         "sensor started"
     );
 
-    // Канал остановки
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Отдельная задача: ждём Ctrl+C
     {
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -54,35 +52,26 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Внешний цикл переподключения
     loop {
         if *shutdown_rx.borrow() {
             break;
         }
 
         match TcpStream::connect(&cfg.server_addr).await {
-            Ok(stream) => {
-                tracing::info!(
-                    server = %cfg.server_addr,
-                    "connected to analyzer"
-                );
+            Ok(tcp) => {
+                tracing::info!("Net sensor connected to analyzer");
 
-                // Важно: передаем shutdown_rx внутрь
-                if let Err(e) = run_sensor(stream, &cfg, shutdown_rx.clone()).await {
-                    if *shutdown_rx.borrow() {
-                        // если остановка — не шумим ошибкой
-                        tracing::info!("sensor stopping, run_sensor finished");
-                    } else {
-                        tracing::error!(error = %e, "run_sensor error");
-                    }
+                let res = if cfg.tls.as_ref().map(|t| t.enabled).unwrap_or(false) {
+                    run_sensor_tls(tcp, &cfg, shutdown_rx.clone()).await
+                } else {
+                    run_sensor_plain(tcp, &cfg, shutdown_rx.clone()).await
+                };
+
+                if let Err(e) = res {
+                    tracing::error!("Net sensor error: {e}");
                 }
             }
-            Err(e) => {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-                tracing::error!(error = %e, "connect error");
-            }
+            Err(e) => tracing::error!("Connect error: {e}"),
         }
 
         if *shutdown_rx.borrow() {
@@ -97,19 +86,64 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_sensor(
-    stream: TcpStream,
+/* ===================== TLS helpers ===================== */
+
+fn tls_cfg_from_section(t: &sov_core::TlsSection) -> sov_transport::tls::TlsConfig {
+    sov_transport::tls::TlsConfig {
+        ca_path: t.ca_path.clone(),
+        cert_path: t.cert_path.clone(),
+        key_path: t.key_path.clone(),
+        server_name: t.server_name.clone(),
+        require_mtls: t.require_mtls,
+    }
+}
+
+async fn run_sensor_plain(
+    tcp: TcpStream,
+    cfg: &sov_core::NetSensorConfig,
+    shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut writer = MessageWriter::new(tcp);
+    capture_loop(cfg, shutdown_rx, &mut writer).await
+}
+
+async fn run_sensor_tls(
+    tcp: TcpStream,
+    cfg: &sov_core::NetSensorConfig,
+    shutdown_rx: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let tls = cfg.tls.as_ref().unwrap();
+    let tls_cfg = tls_cfg_from_section(tls);
+
+    let connector = sov_transport::tls::build_tls_connector(&tls_cfg)?;
+
+    let sni = tls_cfg
+        .server_name
+        .clone()
+        .unwrap_or_else(|| "sov-analyzer".to_string());
+    let server_name = tokio_rustls::rustls::ServerName::try_from(sni.as_str())?;
+
+    let tls_stream = connector.connect(server_name, tcp).await?;
+    tracing::info!("TLS connected to analyzer");
+
+    let (_rd, wr) = tokio::io::split(tls_stream);
+    let mut writer = MessageWriter::new(wr);
+
+    capture_loop(cfg, shutdown_rx, &mut writer).await
+}
+
+/* ===================== PCAP LOOP ===================== */
+
+async fn capture_loop<W: tokio::io::AsyncWrite + Unpin>(
     cfg: &sov_core::NetSensorConfig,
     mut shutdown_rx: watch::Receiver<bool>,
+    writer: &mut MessageWriter<W>,
 ) -> anyhow::Result<()> {
-    let mut writer = MessageWriter::new(stream);
-
     let snaplen: i32 = cfg.snapshot_len.try_into().unwrap_or(i32::MAX);
 
     let mut cap = pcap::Capture::from_device(cfg.iface.as_str())?
         .promisc(cfg.promiscuous)
         .snaplen(snaplen)
-        // важно: timeout, чтобы цикл мог проверить shutdown
         .timeout(1000)
         .open()?;
 
@@ -123,9 +157,8 @@ async fn run_sensor(
     );
 
     loop {
-        // Быстрая проверка: пришел ли shutdown
         if *shutdown_rx.borrow() {
-            tracing::info!("shutdown signal received inside net sensor loop");
+            tracing::info!("shutdown signal received");
             break;
         }
 
@@ -133,25 +166,11 @@ async fn run_sensor(
             Ok(packet) => {
                 let (src_ip, src_port, dst_ip, dst_port, proto) = parse_packet_basic(&packet.data);
 
-                let tcp_payload = extract_tcp_payload(packet.data).unwrap_or(&[]);
-                let payload_snippet = String::from_utf8_lossy(tcp_payload)
+                let payload = extract_tcp_payload(packet.data).unwrap_or(&[]);
+                let payload_snippet = String::from_utf8_lossy(payload)
                     .chars()
                     .take(400)
                     .collect::<String>();
-
-                // Debug-вывод только при HTTP признаках
-                if payload_snippet.contains("GET ")
-                    || payload_snippet.contains("HTTP/")
-                    || payload_snippet.contains("Host:")
-                {
-                    tracing::debug!(
-                        src = %format!("{src_ip}:{src_port}"),
-                        dst = %format!("{dst_ip}:{dst_port}"),
-                        proto = %proto,
-                        "payload snippet: {}",
-                        payload_snippet
-                    );
-                }
 
                 let event = CollectedEvent {
                     meta: BaseEventMeta {
@@ -179,57 +198,36 @@ async fn run_sensor(
                     config_patch: None,
                 };
 
-                // Если анализатор отвалился — выйдем наружу, чтобы reconnect сработал
                 if let Err(e) = writer.send(&msg).await {
-                    tracing::warn!(error = %e, "send failed, will reconnect");
+                    tracing::warn!(error = %e, "send failed");
                     return Err(e.into());
                 }
             }
-            Err(_) => {
-                // timeout / no packet - ignore
-                // за счет timeout мы регулярно возвращаемся сюда и можем выйти по shutdown
-            }
+            Err(_) => {}
         }
     }
 
     Ok(())
 }
 
+/* ===================== PACKET PARSING ===================== */
+
 fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
-    if frame.len() < 14 {
+    if frame.len() < 34 {
         return None;
     }
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
     if ethertype != 0x0800 {
-        return None; // not IPv4
+        return None;
     }
 
     let ip = &frame[14..];
-    if ip.len() < 20 {
+    let ihl = (ip[0] & 0x0F) as usize * 4;
+    if ip.len() < ihl + 20 || ip[9] != 6 {
         return None;
-    }
-
-    let version_ihl = ip[0];
-    let version = version_ihl >> 4;
-    if version != 4 {
-        return None;
-    }
-
-    let ihl = (version_ihl & 0x0F) as usize * 4;
-    if ip.len() < ihl {
-        return None;
-    }
-
-    let proto = ip[9];
-    if proto != 6 {
-        return None; // not TCP
     }
 
     let tcp = &ip[ihl..];
-    if tcp.len() < 20 {
-        return None;
-    }
-
     let data_offset = (tcp[12] >> 4) as usize * 4;
     if tcp.len() < data_offset {
         return None;
@@ -239,65 +237,33 @@ fn extract_tcp_payload(frame: &[u8]) -> Option<&[u8]> {
 }
 
 fn parse_packet_basic(data: &[u8]) -> (String, u16, String, u16, String) {
-    if data.len() < 14 + 20 {
+    if data.len() < 34 {
         return ("0.0.0.0".into(), 0, "0.0.0.0".into(), 0, "RAW".into());
     }
 
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    if ethertype != 0x0800 {
-        return ("0.0.0.0".into(), 0, "0.0.0.0".into(), 0, "NON_IPV4".into());
-    }
-
     let ip = &data[14..];
-    let version = ip[0] >> 4;
-    if version != 4 {
-        return ("0.0.0.0".into(), 0, "0.0.0.0".into(), 0, "NON_IPV4".into());
-    }
-
-    let ihl = (ip[0] & 0x0F) as usize * 4;
-    if ip.len() < ihl {
-        return ("0.0.0.0".into(), 0, "0.0.0.0".into(), 0, "BAD_IHL".into());
-    }
-
-    let proto = ip[9];
     let src_ip = format!("{}.{}.{}.{}", ip[12], ip[13], ip[14], ip[15]);
     let dst_ip = format!("{}.{}.{}.{}", ip[16], ip[17], ip[18], ip[19]);
 
+    let ihl = (ip[0] & 0x0F) as usize * 4;
     let l4 = &ip[ihl..];
+
     if l4.len() < 4 {
         return (src_ip, 0, dst_ip, 0, "NO_L4".into());
     }
 
-    match proto {
-        6 => {
-            if l4.len() < 20 {
-                return (src_ip, 0, dst_ip, 0, "TCP_SHORT".into());
-            }
-            let src_port = u16::from_be_bytes([l4[0], l4[1]]);
-            let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
-            (src_ip, src_port, dst_ip, dst_port, "TCP".into())
-        }
-        17 => {
-            if l4.len() < 8 {
-                return (src_ip, 0, dst_ip, 0, "UDP_SHORT".into());
-            }
-            let src_port = u16::from_be_bytes([l4[0], l4[1]]);
-            let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
-            (src_ip, src_port, dst_ip, dst_port, "UDP".into())
-        }
-        _ => (src_ip, 0, dst_ip, 0, format!("IP_PROTO_{proto}")),
-    }
+    let src_port = u16::from_be_bytes([l4[0], l4[1]]);
+    let dst_port = u16::from_be_bytes([l4[2], l4[3]]);
+
+    (src_ip, src_port, dst_ip, dst_port, "TCP".into())
 }
+
+/* ===================== UTILS ===================== */
 
 fn list_ifaces() -> anyhow::Result<()> {
     let devices = pcap::Device::list()?;
-    println!("Available pcap interfaces:\n");
     for d in devices {
-        println!("Name: {}", d.name);
-        if let Some(desc) = d.desc {
-            println!("  Desc: {}", desc);
-        }
-        println!();
+        println!("{} {:?}", d.name, d.desc);
     }
     Ok(())
 }

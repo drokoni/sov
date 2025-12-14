@@ -1,12 +1,13 @@
 # Где слушает анализатор
 listen_addr: "0.0.0.0:5000"
 
-# Правила обнаружения
+# Правила
 rules_path: "config/rules.yaml"
 
 # Логи
 audit_log_path: "logs/audit.log"
 alerts_log_path: "logs/alerts.log"
+danger_log_path: "logs/danger.log" # ← ВОТ ЭТОГО НЕ ХВАТАЛО
 
 # TLS / mTLS
 tls_enabled: true
@@ -16,5 +17,4 @@ tls_ca_path: "config/pki/ca.crt"
 tls_cert_path: "config/pki/analyzer.crt"
 tls_key_path: "config/pki/analyzer.key"
 
-# Имя сервера (SAN / SNI)
 tls_server_name: "sov-analyzer"
