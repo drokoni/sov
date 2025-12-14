@@ -1,10 +1,10 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
+pub mod tls;
 use sov_core::{CollectedEvent, RuleSet};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageType {
     Event,
     RulesetUpdate,

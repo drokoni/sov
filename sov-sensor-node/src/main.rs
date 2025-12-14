@@ -20,8 +20,11 @@ async fn main() -> anyhow::Result<()> {
     init_logging();
     let args = Args::parse();
     let cfg = load_node_sensor_config(&args.config)?;
+
+    let os = args.os.unwrap_or_else(source::default_os);
+
     tracing::info!(
-        sensor = "node",  // или "net"
+        sensor = "node",
         node_id = %cfg.node_id,
         server = %cfg.server_addr,
         "sensor started"
@@ -44,46 +47,68 @@ async fn main() -> anyhow::Result<()> {
     loop {
         match TcpStream::connect(&cfg.server_addr).await {
             Ok(stream) => {
-                println!("Node sensor connected to analyzer at {}", cfg.server_addr);
-                if let Err(e) = run_sensor(stream, &cfg, os).await {
-                    eprintln!("Node sensor error: {e}");
+                tracing::info!("Node sensor connected to analyzer at {}", cfg.server_addr);
+
+                if let Err(e) = run_sensor(stream, &cfg, os, shutdown_rx.clone()).await {
+                    tracing::error!("Node sensor error: {e}");
                 }
             }
-            Err(e) => eprintln!("Connect error: {e}"),
+            Err(e) => tracing::warn!("Connect error: {e}"),
+        }
+
+        // если shutdown уже поднят — выходим, не реконнектимся
+        if *shutdown_rx.borrow() {
+            tracing::warn!("shutdown flag set, stopping reconnect loop");
+            break;
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
+
+    tracing::info!("node sensor stopped");
+    Ok(())
 }
 
 async fn run_sensor(
     stream: TcpStream,
     cfg: &sov_core::NodeSensorConfig,
     os: source::OsKind,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut writer = MessageWriter::new(stream);
+
     let mut src = source::create_source(os, cfg)?;
 
     loop {
-        let events = src.poll().await?;
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    tracing::warn!("shutdown received, stopping node sensor loop");
+                    return Ok(());
+                }
+            }
 
-        for ev in events {
-            let msg = WireMessage {
-                kind: MessageType::Event,
-                event: Some(ev),
-                ruleset: None,
-            };
-            writer.send(&msg).await?;
+            res = src.poll() => {
+                let events = res?;
+                for ev in events {
+                    let msg = WireMessage {
+                        kind: MessageType::Event,
+                        event: Some(ev),
+                        ruleset: None,
+                        status: None,
+                        config_patch: None,
+                    };
+                    writer.send(&msg).await?;
+                }
+            }
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(cfg.poll_interval_ms)).await;
     }
 }
+
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

@@ -45,8 +45,31 @@ async fn main() -> anyhow::Result<()> {
     let ruleset = Arc::new(RwLock::new(initial_ruleset));
 
     let audit = AuditLogger::new(&cfg.audit_log_path);
+    let tls_cfg = if cfg.tls_enabled {
+        let cert = cfg
+            .tls_cert_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("tls_enabled=true but tls_cert_path missing"))?;
+        let key = cfg
+            .tls_key_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("tls_enabled=true but tls_key_path missing"))?;
+        let ca = cfg
+            .tls_ca_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("tls_enabled=true but tls_ca_path missing"))?;
 
-    let tls_cfg = cfg.tls.clone().filter(|t| t.enabled);
+        Some(sov_transport::tls::TlsConfig {
+            ca_path: ca.to_string_lossy().to_string(),
+            cert_path: cert.to_string_lossy().to_string(),
+            key_path: key.to_string_lossy().to_string(),
+            server_name: cfg.tls_server_name.clone(),
+            require_mtls: cfg.tls_require_mtls,
+        })
+    } else {
+        None
+    };
+
     let tls_acceptor = if let Some(t) = &tls_cfg {
         Some(build_tls_acceptor(&sov_transport::tls::TlsConfig {
             ca_path: t.ca_path.clone(),

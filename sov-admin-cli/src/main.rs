@@ -4,6 +4,7 @@ use sov_transport::tls::{TlsConfig, build_tls_connector};
 use sov_transport::{MessageReader, MessageType, MessageWriter, WireMessage};
 use std::path::PathBuf;
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::ServerName;
 
 #[derive(Parser, Debug)]
 #[command(name = "sov-admin")]
@@ -166,7 +167,11 @@ async fn connect_cli(
         .server_name
         .clone()
         .unwrap_or_else(|| "sov-analyzer".into());
-    let tls_stream = tls.connect(sni.try_into()?, tcp).await?;
+
+    let server_name = ServerName::try_from(sni.as_str())
+        .map_err(|_| anyhow::anyhow!("bad tls server_name: {sni}"))?;
+
+    let tls_stream = tls.connect(server_name, tcp).await?;
 
     let (r, w) = tokio::io::split(tls_stream);
     Ok((MessageReader::new(r), MessageWriter::new(w)))

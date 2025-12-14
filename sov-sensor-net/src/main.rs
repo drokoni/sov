@@ -175,6 +175,8 @@ async fn run_sensor(
                     kind: MessageType::Event,
                     event: Some(event),
                     ruleset: None,
+                    status: None,
+                    config_patch: None,
                 };
 
                 // Если анализатор отвалился — выйдем наружу, чтобы reconnect сработал
