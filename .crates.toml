@@ -1,0 +1,3 @@
+[v1]
+"sov-sensor-net 0.1.0 (path+file:///home/user/work/sov/sov-sensor-net)" = ["sov-sensor-net"]
+"sov-sensor-node 0.1.0 (path+file:///home/user/work/sov/sov-sensor-node)" = ["sov-sensor-node"]
